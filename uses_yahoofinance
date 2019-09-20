@@ -1,0 +1,194 @@
+from yahoofinancials import YahooFinancials as y
+import robin_stocks as r
+from datetime import datetime
+from bs4 import BeautifulSoup
+from requests.packages.urllib3.exceptions import InsecureRequestWarning
+import xlrd, requests, json, time, base64, warnings, easygui
+from currency_converter import CurrencyConverter
+
+c = CurrencyConverter()
+today = datetime.now()
+tomorrow = []
+
+class AnalyzeStock:
+    def __init__(self, x):
+            self.Symbol = x[0]
+            self.Name = x[1]
+            self.Dividend_Yield = x[3].replace('%', '')
+            self.Years_Paying = x[4]
+            self.Dividata_Rating = x[5]
+            self.Current_Price = 0
+            self.Daily_Low = 0
+            self.Daily_High = 0
+            self.Currency = 0
+            self.Price_Moved = 0
+            self.Percent_Changed = 0
+            self.Previous_Close = 0
+            self.Open_Price = 0
+            self.Ten_Day_Avg = 0
+            self.Dividend_Rate = 0
+            self.Payout_Ratio = 0
+            self.Dividend_Date = 0
+            self.Last_Payout_Amount = 0
+
+def dividend_filter(stocks):
+    my_list = []
+    for stock in stocks:
+        if 'N/A' not in stock.Dividata_Rating:
+            if int(stock.Dividata_Rating) >= 4:
+                my_list.append(stock)
+    return my_list
+
+def years_paid_filter(good_div):
+    my_list = []
+    for stock in good_div:
+        if int(stock.Years_Paying) >= 7:
+            my_list.append(stock)
+    return my_list
+
+def yield_filter(good_years):
+    my_list = []
+    for stock in good_years:
+        if float(stock.Dividend_Yield) >= 4:
+            my_list.append(stock)
+    return my_list
+
+def monthly_div_filter(good_years):
+    my_list = []
+    for stock in good_years:
+        if (stock.Last_Payout_Amount * 6) > stock.Dividend_Rate:
+            my_list.append(stock)
+    return my_list
+
+def targeting_stocks(table):
+    rows = table.find_all('tr')
+    stocks = [AnalyzeStock([td.text for td in row.find_all('td')]) for row in rows]
+    good_div = dividend_filter(stocks)
+    good_years = years_paid_filter(good_div)
+    good_yield = yield_filter(good_years)
+    for g in good_yield:
+        try:
+            yahoo_finance = y(g.Symbol)
+            g.Current_Price = round(yahoo_finance.get_current_price(), 2)
+            g.Daily_Low = yahoo_finance.get_daily_low()
+            g.Daily_High = yahoo_finance.get_daily_high()
+            g.Currency = yahoo_finance.get_currency()
+            g.Price_Moved = yahoo_finance.get_current_change()
+            g.Percent_Changed = yahoo_finance.get_current_percent_change()*100
+            g.Previous_Close = yahoo_finance.get_prev_close_price()
+            g.Open_Price = yahoo_finance.get_open_price()
+            g.Ten_Day_Avg = yahoo_finance.get_ten_day_avg_daily_volume()
+            g.Dividend_Yield = yahoo_finance.get_dividend_yield()
+            g.Dividend_Rate = yahoo_finance.get_dividend_rate()
+            g.Payout_Ratio = yahoo_finance.get_payout_ratio()
+            g.Dividend_Date = yahoo_finance.get_exdividend_date()
+            divie_data = yahoo_finance.get_historical_price_data('2019-02-20', '2019-10-10', 'monthly')
+            ml = list(divie_data.get(g.Symbol).get('eventsData').get('dividends').keys())
+            g.Last_Payout_Amount = divie_data.get(g.Symbol).get('eventsData').get('dividends').get(ml[0]).get('amount')
+        except Exception as e:
+            print('Failed', g.Symbol, e)
+            good_yield.remove(g)
+        time.sleep(2)
+    filtered = monthly_div_filter(good_yield)
+    return sorted(filtered, key=lambda x: x.Dividend_Yield, reverse=True)
+
+def target_stocks():
+    page = requests.get('https://dividata.com/dividates')
+    soup = BeautifulSoup(page.content, 'html.parser')
+    tables = soup.find_all('tbody')
+    global tomorrow
+    tomorrow = targeting_stocks(tables[1])
+    return targeting_stocks(tables[0])
+
+def sell_old_stocks():
+    current_holdings = [[x.get('instrument'), x.get('record_date')] for x in r.get_dividends()]
+    positions_data = r.get_current_positions()
+    sleep_time = 0
+    for position in positions_data:
+        for d in current_holdings:
+            if position.get('instrument') in d[0]:
+                about = r.request_get(position['instrument'])
+                div_diff = (datetime.strptime(d[1], '%Y-%m-%d') - today).days
+                stock_dict = r.stocks.get_stock_quote_by_symbol(about.get('symbol'))
+                last_trade_price = float(stock_dict.get('last_trade_price'))
+                if div_diff <= 0:
+                    if last_trade_price / float(position['average_buy_price']) > 1:
+                        if float(position.get('shares_held_for_sells')) == 0:
+                            r.order_sell_limit(about.get('symbol'), position['quantity'], round(last_trade_price*1.003, 2))
+                            print('selling ', about.get('symbol'))
+                            sleep_time = 1
+                elif last_trade_price / float(position['average_buy_price']) > 1.01:
+                    if float(position.get('shares_held_for_sells')) == 0:
+                        r.order_sell_limit(about.get('symbol'), position['quantity'], round(last_trade_price * 1.003, 2))
+                        print('selling ', about.get('symbol'))
+                        sleep_time = 1
+    time.sleep(sleep_time)
+
+
+def execute_order(shares_to_buy, stock_price, ticker, i):
+    if shares_to_buy > 0:
+        r.orders.order_buy_limit(ticker, int(shares_to_buy), round(float(stock_price * i), 2), timeInForce='gfd')
+        return shares_to_buy * stock_price
+
+def get_new_stocks():
+    play_money = float(r.load_account_profile()['margin_balances'].get('day_trade_buying_power'))
+    current_holdings = r.build_holdings().keys()
+    """
+    Next line of business
+    Take analyzing stock more seriously
+        Analyze whether currently up or down (g.Percent_Changed), put bid 1% below g.Daily_Low
+    """
+    for g in g_sorted[:1]:
+        if g.Symbol not in current_holdings:
+            if round(play_money / g.Current_Price)*.5 > 0:
+                if g.Percent_Changed < -2:
+                    play_money = play_money - execute_order(round(play_money / g.Current_Price), g.Current_Price, g.Symbol, .995)
+                    print('placed dumpster fire for today ', g.Name)
+                else:
+                    play_money = play_money - execute_order(round(play_money / g.Current_Price)*.5, g.Current_Price, g.Symbol, .995)
+                    print('placed for today ', g.Name)
+
+    for g in tomorrow[:1]:
+        if g.Symbol not in current_holdings:
+            if round(play_money / g.Current_Price) > 0:
+                play_money = play_money - execute_order(round(play_money / g.Current_Price), g.Current_Price, g.Symbol, .985)
+                print('placed for tomorrow ', g.Name)
+
+    for g in g_sorted[1:2]:
+        if g.Symbol not in current_holdings:
+            if round(play_money / g.Current_Price) > 0:
+                play_money = play_money - execute_order(round(play_money / g.Current_Price), g.Current_Price, g.Symbol, .995)
+                print('Runner up today ', g.Name)
+
+    for g in tomorrow[1:2]:
+        if g.Symbol not in current_holdings:
+            if round(play_money / g.Current_Price) > 0:
+                play_money = play_money - execute_order(round(play_money / g.Current_Price), g.Current_Price, g.Symbol, .98)
+                print('Runner up tomorrow ', g.Name)
+    for g in g_sorted[:1]:
+        if g.Symbol not in current_holdings:
+            if round(play_money / g.Current_Price) > 0:
+                play_money = play_money - execute_order(round(play_money / g.Current_Price), g.Current_Price, g.Symbol, .995)
+                print('placed for today ', g.Name, play_money)
+
+g_sorted = target_stocks()
+try:
+    with open('grocery_list.txt') as f:
+        lettuce = base64.b64decode(f.read())
+except FileNotFoundError:
+    with open('grocery_list.txt', 'w') as f:
+        lettuce = base64.b64encode(
+            bytes(easygui.passwordbox(msg='Let me have that', title='Please'), 'utf-8'))
+        f.write("".join(chr(x) for x in lettuce))
+login = r.login('******@gmail.com', lettuce)#, store_session=False)
+
+while True:
+    sell_old_stocks()
+    if r.get_all_open_orders()[0] is not None:
+        cancel_open_buys = [x.get('id') for x in r.get_all_open_orders(info=None) if x.get('side') == 'buy']
+        for x in cancel_open_buys:
+            r.orders.cancel_order(x)
+    get_new_stocks()
+    time.sleep(60*30)
+    get_new_stocks()
+    time.sleep(60*30)
